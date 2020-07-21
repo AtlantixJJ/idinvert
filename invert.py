@@ -126,12 +126,16 @@ def main():
   # Load image list.
   logger.info(f'Loading image list.')
   image_list = []
+  optimization_list = []
   with open(args.image_list, 'r') as f:
     for line in f:
-      image_list.append(line.strip())
+      fp, op = line.strip().split(' ')
+      image_list.append(fp)
+      optimization_list.append(int(op))
 
   # Invert images.
   logger.info(f'Start inversion.')
+  """
   save_interval = args.num_iterations // args.num_results
   headers = ['Name', 'Original Image', 'Encoder Output']
   for step in range(1, args.num_iterations + 1):
@@ -141,6 +145,7 @@ def main():
   visualizer = HtmlPageVisualizer(
       num_rows=len(image_list), num_cols=len(headers), viz_size=viz_size)
   visualizer.set_headers(headers)
+  """
 
   images = np.zeros(input_shape, np.uint8)
   names = ['' for _ in range(args.batch_size)]
@@ -161,32 +166,36 @@ def main():
     outputs[1] = adjust_pixel_range(outputs[1])
     for i, _ in enumerate(batch):
       image = np.transpose(images[i], [1, 2, 0])
-      save_image(f'{output_dir}/{names[i]}_ori.png', image)
+      #save_image(f'{output_dir}/{names[i]}_ori.png', image)
       save_image(f'{output_dir}/{names[i]}_enc.png', outputs[1][i])
-      visualizer.set_cell(i + img_idx, 0, text=names[i])
-      visualizer.set_cell(i + img_idx, 1, image=image)
-      visualizer.set_cell(i + img_idx, 2, image=outputs[1][i])
+      #visualizer.set_cell(i + img_idx, 0, text=names[i])
+      #visualizer.set_cell(i + img_idx, 1, image=image)
+      #visualizer.set_cell(i + img_idx, 2, image=outputs[1][i])
     # Optimize latent codes.
     col_idx = 3
-    for step in tqdm(range(1, args.num_iterations + 1), leave=False):
+    optim_iters = optimization_list[img_idx]
+    if optim_iters == 0: continue
+    #for step in tqdm(range(1, args.num_iterations + 1), leave=False):
+    for step in tqdm(range(1, optim_iters + 1), leave=False):
       sess.run(train_op, {x: inputs})
-      if step == args.num_iterations or step % save_interval == 0:
+      if step == optim_iters:
         outputs = sess.run([wp, x_rec])
         outputs[1] = adjust_pixel_range(outputs[1])
         for i, _ in enumerate(batch):
-          if step == args.num_iterations:
-            save_image(f'{output_dir}/{names[i]}_inv.png', outputs[1][i])
-          visualizer.set_cell(i + img_idx, col_idx, image=outputs[1][i])
+          if step == optim_iters:
+            save_image(f'{output_dir}/{names[i]}_enc.png', outputs[1][i])
+          #visualizer.set_cell(i + img_idx, col_idx, image=outputs[1][i])
         col_idx += 1
-    latent_codes.append(outputs[0][0:len(batch)])
-
+        latent_codes.append(outputs[0][0:len(batch)])
+  latent_codes_enc = np.concatenate(latent_codes_enc, axis=0)
+  latent_codes = np.concatenate(latent_codes, axis=0)
+  print(latent_codes_enc.shape, latent_codes.shape)
   # Save results.
   os.system(f'cp {args.image_list} {output_dir}/image_list.txt')
-  np.save(f'{output_dir}/encoded_codes.npy',
-          np.concatenate(latent_codes_enc, axis=0))
-  np.save(f'{output_dir}/inverted_codes.npy',
-          np.concatenate(latent_codes, axis=0))
-  visualizer.save(f'{output_dir}/inversion.html')
+  np.save(f'{output_dir}/encoded_codes.npy', latent_codes_enc)
+  np.save(f'{output_dir}/inverted_codes.npy', latent_codes)
+  
+  #visualizer.save(f'{output_dir}/inversion.html')
 
 
 if __name__ == '__main__':

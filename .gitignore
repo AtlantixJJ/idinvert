@@ -4,6 +4,7 @@ __pycache__/
 *.jpg
 *.png
 *.jpeg
+*.list
 *.npy
 *.log
 /results/
