@@ -18,7 +18,7 @@ from dnnlib import tflib
 from perceptual_model import PerceptualModel
 from utils.logger import setup_logger
 from utils.visualizer import adjust_pixel_range
-from utils.visualizer import HtmlPageVisualizer
+from utils.visualizer import VideoWriter
 from utils.visualizer import save_image, load_image, resize_image
 
 
@@ -33,7 +33,7 @@ def parse_args():
                       help='Directory to save the results. If not specified, '
                            '`./results/inversion/${IMAGE_LIST}` '
                            'will be used by default.')
-  parser.add_argument('--batch_size', type=int, default=4,
+  parser.add_argument('--batch_size', type=int, default=1,
                       help='Batch size. (default: 4)')
   parser.add_argument('--learning_rate', type=float, default=0.01,
                       help='Learning rate for optimization. (default: 0.01)')
@@ -135,23 +135,23 @@ def main():
 
   # Invert images.
   logger.info(f'Start inversion.')
-  """
-  save_interval = args.num_iterations // args.num_results
-  headers = ['Name', 'Original Image', 'Encoder Output']
-  for step in range(1, args.num_iterations + 1):
-    if step == args.num_iterations or step % save_interval == 0:
-      headers.append(f'Step {step:06d}')
-  viz_size = None if args.viz_size == 0 else args.viz_size
-  visualizer = HtmlPageVisualizer(
-      num_rows=len(image_list), num_cols=len(headers), viz_size=viz_size)
-  visualizer.set_headers(headers)
-  """
+
+  ori_video = 0 # VideoWriter(f'{output_dir}/ori_0.mp4', 256, 256)
+  enc_video = 0 # VideoWriter(f'{output_dir}/enc_0.mp4', 256, 256)
+  cnt = 0
 
   images = np.zeros(input_shape, np.uint8)
   names = ['' for _ in range(args.batch_size)]
   latent_codes_enc = []
   latent_codes = []
   for img_idx in tqdm(range(0, len(image_list), args.batch_size), leave=False):
+    if optimization_list[img_idx] > 0:
+      del ori_video
+      del enc_video
+      ori_video = VideoWriter(f'{output_dir}/ori_{cnt}.mp4', 256, 256)
+      enc_video = VideoWriter(f'{output_dir}/enc_{cnt}.mp4', 256, 256)
+      cnt += 1
+
     # Load inputs.
     batch = image_list[img_idx:img_idx + args.batch_size]
     for i, image_path in enumerate(batch):
@@ -166,11 +166,10 @@ def main():
     outputs[1] = adjust_pixel_range(outputs[1])
     for i, _ in enumerate(batch):
       image = np.transpose(images[i], [1, 2, 0])
-      #save_image(f'{output_dir}/{names[i]}_ori.png', image)
-      save_image(f'{output_dir}/{names[i]}_enc.png', outputs[1][i])
-      #visualizer.set_cell(i + img_idx, 0, text=names[i])
-      #visualizer.set_cell(i + img_idx, 1, image=image)
-      #visualizer.set_cell(i + img_idx, 2, image=outputs[1][i])
+      ori_video.write(image)
+      enc_video.write(outputs[1][i])
+      #save_image(f'{output_dir}/{names[i]}_enc.png', outputs[1][i])
+
     # Optimize latent codes.
     col_idx = 3
     optim_iters = optimization_list[img_idx]
@@ -180,13 +179,9 @@ def main():
       sess.run(train_op, {x: inputs})
       if step == optim_iters:
         outputs = sess.run([wp, x_rec])
-        outputs[1] = adjust_pixel_range(outputs[1])
-        for i, _ in enumerate(batch):
-          if step == optim_iters:
-            save_image(f'{output_dir}/{names[i]}_enc.png', outputs[1][i])
-          #visualizer.set_cell(i + img_idx, col_idx, image=outputs[1][i])
-        col_idx += 1
-        latent_codes.append(outputs[0][0:len(batch)])
+        #outputs[1] = adjust_pixel_range(outputs[1])
+        latent_codes.append(outputs[0][0:1])
+
   latent_codes_enc = np.concatenate(latent_codes_enc, axis=0)
   latent_codes = np.concatenate(latent_codes, axis=0)
   print(latent_codes_enc.shape, latent_codes.shape)
@@ -194,8 +189,6 @@ def main():
   os.system(f'cp {args.image_list} {output_dir}/image_list.txt')
   np.save(f'{output_dir}/encoded_codes.npy', latent_codes_enc)
   np.save(f'{output_dir}/inverted_codes.npy', latent_codes)
-  
-  #visualizer.save(f'{output_dir}/inversion.html')
 
 
 if __name__ == '__main__':
