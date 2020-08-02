@@ -25,8 +25,8 @@ class PerceptualModel(Model):
       features = Concatenate(axis=-1)(layer_outputs)
     else:
       layer_ids = [13]  # 13 -> conv4_3
-      features = [
-          Flatten()(vgg.layers[layer_id].output) for layer_id in layer_ids]
+      #features = [Flatten()(vgg.layers[layer_id].output) for layer_id in layer_ids]
+      features = [vgg.layers[layer_id].output for layer_id in layer_ids]
 
     self._model = Model(inputs=vgg.input, outputs=features)
 

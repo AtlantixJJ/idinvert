@@ -41,4 +41,16 @@ elif args.type == 'at':
     basecmd = f"ffmpeg -i {videos} -filter_complex \"[0:v][1:v]hstack\" -b:v 16000k -y {DIR}/at45_final_{i}.mp4"
     os.system(basecmd) 
 
+elif args.type == 'MPI':
+  indir = args.dir
+  for i in range(1):
+    basecmd = f"ffmpeg -i {indir}/{i:06d}_transform%03d_inv.png -b:v 16000k -y {indir}/{i:06d}_inv.mp4"
+    os.system(basecmd)  
+
+elif args.type == 'MPI_noenc':
+  indir = args.dir
+  for i in range(1):
+    basecmd = f"ffmpeg -i {indir}/{i:06d}_transform%03d_inv_noenc.png -b:v 16000k -y {indir}/{i:06d}_inv_noenc.mp4"
+    os.system(basecmd)  
+   
 # ffmpeg -i enc.mp4 -i rem.mp4 -filter_complex "[0:v:0][1:v:0]hstack=inputs=2" -b:v 16000k -y final.mp4

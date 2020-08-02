@@ -8,6 +8,7 @@ code.
 """
 
 import os
+import threading
 import argparse
 import pickle
 from tqdm import tqdm
@@ -29,6 +30,8 @@ def parse_args():
                       help='Path to the pre-trained model.')
   parser.add_argument('image_list', type=str,
                       help='List of images to invert.')
+  parser.add_argument('--MPI',
+                      default='0,1')
   parser.add_argument('-o', '--output_dir', type=str, default='',
                       help='Directory to save the results. If not specified, '
                            '`./results/inversion/${IMAGE_LIST}` '
@@ -39,26 +42,35 @@ def parse_args():
                       help='Learning rate for optimization. (default: 0.01)')
   parser.add_argument('--num_iterations', type=int, default=100,
                       help='Number of optimization iterations. (default: 100)')
-  parser.add_argument('--num_results', type=int, default=5,
-                      help='Number of intermediate optimization results to '
-                           'save for each sample. (default: 5)')
   parser.add_argument('-R', '--random_init', action='store_true',
                       help='Whether to use random initialization instead of '
                            'the output from encoder. (default: False)')
-  parser.add_argument('-E', '--domain_regularizer', action='store_false',
+  parser.add_argument('-E', '--domain_regularizer', action='store_true',
                       help='Whether to use domain regularizer for '
-                           'optimization. (default: True)')
+                           'optimization. (default: False)')
   parser.add_argument('--loss_weight_feat', type=float, default=5e-5,
                       help='The perceptual loss scale for optimization. '
                            '(default: 5e-5)')
   parser.add_argument('--loss_weight_enc', type=float, default=2.0,
                       help='The encoder loss scale for optimization.'
                            '(default: 2.0)')
-  parser.add_argument('--viz_size', type=int, default=256,
-                      help='Image size for visualization. (default: 256)')
   parser.add_argument('--gpu_id', type=str, default='0',
                       help='Which GPU(s) to use. (default: `0`)')
   return parser.parse_args()
+
+
+def get_mask_name(n):
+  ind = n.rfind("/")
+  s = n[ind:]
+  return n[:ind] + s.replace("transform", "mask")
+
+
+def combine_MPI_array(name, world_size):
+  arrs = []
+  for i in range(world_size):
+    arr = np.load(name.format(rank=i, world_size=world_size))
+    arrs.append(arr)
+  return np.concatenate(arrs, 0)
 
 
 def main():
@@ -69,6 +81,39 @@ def main():
   image_list_name = os.path.splitext(os.path.basename(args.image_list))[0]
   output_dir = args.output_dir or f'results/inversion/{image_list_name}'
   logger = setup_logger(output_dir, 'inversion.log', 'inversion_logger')
+
+  if "," not in args.MPI:
+    world_size = int(args.MPI)
+    gpus = [0, 1, 3, 6, 7]#[0, 1, 2, 3, 4, 5, 6, 7]
+    threads = []
+    for i in range(world_size):
+      t = "-R" if args.random_init else ""
+      t = t + (" -E" if args.domain_regularizer else "")
+      func = lambda : os.system(f"CUDA_VISIBLE_DEVICES={gpus[i]} python invert_mask.py {args.model_path} {args.image_list} --num_iterations {args.num_iterations} --MPI {i},{world_size} --gpu_id {gpus[i]} {t}")
+      th = threading.Thread(target=func)
+      th.start()
+      threads.append(th)
+    for th in threads:
+      th.join()
+
+    ts = "_noenc" if args.random_init else ""
+
+    for rank in range(world_size):
+      np.save(f"{output_dir}/encoded_codes.mpy", combine_MPI_array(
+        output_dir + "/encoded_codes_MPI{rank},{world_size}" + f"{ts}.npy",
+        world_size))
+      np.save(f"{output_dir}/inverted_codes.mpy", combine_MPI_array(
+        output_dir + "/inverted_codes_MPI{rank},{world_size}" + f"{ts}.npy",
+        world_size))
+
+    basecmd = f"ffmpeg -i {output_dir}/{0:06d}_transform%03d_inv_noenc.png -b:v 16000k -y {output_dir}/{0:06d}_inv_noenc.mp4"
+    os.system(basecmd)
+
+    exit(0)
+
+  rank, world_size = args.MPI.split(",")
+  rank = int(rank)
+  world_size = int(world_size)
 
   logger.info(f'Loading model.')
   tflib.init_tf({'rnd.np_random_seed': 1000})
@@ -84,7 +129,10 @@ def main():
   sess = tf.get_default_session()
   input_shape = E.input_shape
   input_shape[0] = args.batch_size
+  mask_shape = input_shape[:]
+  mask_shape[1] = 1
   x = tf.placeholder(tf.float32, shape=input_shape, name='real_image')
+  mask = tf.placeholder(tf.float32, shape=mask_shape, name='mask')
   x_255 = (tf.transpose(x, [0, 2, 3, 1]) + 1) / 2 * 255
   latent_shape = Gs.components.synthesis.input_shape
   latent_shape[0] = args.batch_size
@@ -106,8 +154,12 @@ def main():
   perceptual_model = PerceptualModel([image_size, image_size], False)
   x_feat = perceptual_model(x_255)
   x_rec_feat = perceptual_model(x_rec_255)
-  loss_feat = tf.reduce_mean(tf.square(x_feat - x_rec_feat), axis=[1])
-  loss_pix = tf.reduce_mean(tf.square(x - x_rec), axis=[1, 2, 3])
+  #loss_feat = tf.reduce_mean(tf.square(x_feat - x_rec_feat), axis=[1])
+  smask = tf.image.resize(tf.transpose(mask, [0, 2, 3, 1]), [32, 32])
+  loss_feat = tf.reduce_sum(tf.square(x_feat - x_rec_feat) * smask) / tf.reduce_sum(smask)
+  # loss_pix = tf.reduce_mean(tf.square(x - x_rec), axis=[1, 2, 3])
+  loss_pix = tf.reduce_sum(tf.square(x - x_rec) * mask) \
+    / tf.reduce_sum(mask)
   if args.domain_regularizer:
     logger.info(f'  Involve encoder for optimization.')
     w_enc_new = E.get_output_for(x_rec, phase=False)
@@ -132,63 +184,63 @@ def main():
       fp, op = line.strip().split(' ')
       image_list.append(fp)
       optimization_list.append(int(op))
+  ts = len(image_list) // world_size
 
   # Invert images.
   logger.info(f'Start inversion.')
 
-  ori_video = 0 # VideoWriter(f'{output_dir}/ori_0.mp4', 256, 256)
-  enc_video = 0 # VideoWriter(f'{output_dir}/enc_0.mp4', 256, 256)
-  cnt = 0
-
   images = np.zeros(input_shape, np.uint8)
+  masks = np.zeros(mask_shape, np.float32)
   names = ['' for _ in range(args.batch_size)]
   latent_codes_enc = []
   latent_codes = []
-  for img_idx in tqdm(range(0, len(image_list), args.batch_size), leave=False):
-    if optimization_list[img_idx] > 0:
-      del ori_video
-      del enc_video
-      ori_video = VideoWriter(f'{output_dir}/ori_{cnt}.mp4', 256, 256)
-      enc_video = VideoWriter(f'{output_dir}/enc_{cnt}.mp4', 256, 256)
-      cnt += 1
-
+  for img_idx in tqdm(range(ts * rank, ts * (rank + 1), args.batch_size), leave=False):
     # Load inputs.
     batch = image_list[img_idx:img_idx + args.batch_size]
     for i, image_path in enumerate(batch):
       image = resize_image(load_image(image_path), (image_size, image_size))
+      mask_img = resize_image(load_image(get_mask_name(image_path)),
+        (image_size, image_size))
+      masks[i, 0] = mask_img[:, :, 0] / 255.
       images[i] = np.transpose(image, [2, 0, 1])
       names[i] = os.path.splitext(os.path.basename(image_path))[0]
     inputs = images.astype(np.float32) / 255 * 2.0 - 1.0
+
     # Run encoder.
     sess.run([setter], {x: inputs})
     outputs = sess.run([wp, x_rec])
     latent_codes_enc.append(outputs[0][0:len(batch)])
     outputs[1] = adjust_pixel_range(outputs[1])
-    for i, _ in enumerate(batch):
-      image = np.transpose(images[i], [1, 2, 0])
-      ori_video.write(image)
-      enc_video.write(outputs[1][i])
-      #save_image(f'{output_dir}/{names[i]}_enc.png', outputs[1][i])
+
+    #sm = sess.run([smask], {x: inputs, mask: masks})[0]
+    #sm = np.repeat(sm[0], 3, 2) * 255
+    #save_image(f'{output_dir}/{names[i]}_smask.png', sm.astype("uint8"))
+    #save_image(f'{output_dir}/{names[i]}_mask.png', mask_img)
 
     # Optimize latent codes.
     col_idx = 3
-    optim_iters = optimization_list[img_idx]
-    if optim_iters == 0: continue
-    #for step in tqdm(range(1, args.num_iterations + 1), leave=False):
-    for step in tqdm(range(1, optim_iters + 1), leave=False):
-      sess.run(train_op, {x: inputs})
-      if step == optim_iters:
-        outputs = sess.run([wp, x_rec])
-        #outputs[1] = adjust_pixel_range(outputs[1])
-        latent_codes.append(outputs[0][0:1])
+    for step in tqdm(range(1, args.num_iterations + 1), leave=False):
+      sess.run([train_op], {x: inputs, mask: masks})
+    
+    outputs = sess.run([wp, x_rec])
+    outputs[1] = adjust_pixel_range(outputs[1])
+    if args.random_init:
+      save_image(f'{output_dir}/{names[i]}_inv_noenc.png', outputs[1][i])
+    else:
+      save_image(f'{output_dir}/{names[i]}_inv.png', outputs[1][i])
+    latent_codes.append(outputs[0][0:1])
 
   latent_codes_enc = np.concatenate(latent_codes_enc, axis=0)
   latent_codes = np.concatenate(latent_codes, axis=0)
   print(latent_codes_enc.shape, latent_codes.shape)
   # Save results.
-  os.system(f'cp {args.image_list} {output_dir}/image_list.txt')
-  np.save(f'{output_dir}/encoded_codes.npy', latent_codes_enc)
-  np.save(f'{output_dir}/inverted_codes.npy', latent_codes)
+  os.system(f'cp {args.image_list} {output_dir}/image_list_MPI{rank},{world_size}.txt')
+  if args.random_init:
+    np.save(f'{output_dir}/encoded_codes_MPI{rank},{world_size}_noenc.npy', latent_codes_enc)
+    np.save(f'{output_dir}/inverted_codes_MPI{rank},{world_size}_noenc.npy', latent_codes)
+  else:
+    np.save(f'{output_dir}/encoded_codes_MPI{rank},{world_size}.npy', latent_codes_enc)
+    np.save(f'{output_dir}/inverted_codes_MPI{rank},{world_size}.npy', latent_codes)
 
 
 if __name__ == '__main__':
