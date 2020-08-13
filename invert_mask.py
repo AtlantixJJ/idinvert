@@ -84,12 +84,12 @@ def main():
 
   if "," not in args.MPI:
     world_size = int(args.MPI)
-    gpus = [0, 1, 3, 6, 7]#[0, 1, 2, 3, 4, 5, 6, 7]
+    gpus = [0, 1, 4, 7]#[0, 1, 2, 3, 4, 5, 6, 7]
     threads = []
     for i in range(world_size):
       t = "-R" if args.random_init else ""
       t = t + (" -E" if args.domain_regularizer else "")
-      func = lambda : os.system(f"CUDA_VISIBLE_DEVICES={gpus[i]} python invert_mask.py {args.model_path} {args.image_list} --num_iterations {args.num_iterations} --MPI {i},{world_size} --gpu_id {gpus[i]} {t}")
+      func = lambda : os.system(f"CUDA_VISIBLE_DEVICES={gpus[i]} python invert_mask.py {args.model_path} {args.image_list} --num_iterations {args.num_iterations} --MPI {i},{world_size} --gpu_id {gpus[i]} {t} --learning_rate {args.learning_rate}")
       th = threading.Thread(target=func)
       th.start()
       threads.append(th)
@@ -106,7 +106,7 @@ def main():
         output_dir + "/inverted_codes_MPI{rank},{world_size}" + f"{ts}.npy",
         world_size))
 
-    basecmd = f"ffmpeg -i {output_dir}/{0:06d}_transform%03d_inv_noenc.png -b:v 16000k -y {output_dir}/{0:06d}_inv_noenc.mp4"
+    basecmd = f"ffmpeg -i {output_dir}/{0:06d}_transform%03d_inv{ts}.png -b:v 16000k -y {output_dir}/{0:06d}_inv{ts}.mp4"
     os.system(basecmd)
 
     exit(0)
@@ -156,7 +156,8 @@ def main():
   x_rec_feat = perceptual_model(x_rec_255)
   #loss_feat = tf.reduce_mean(tf.square(x_feat - x_rec_feat), axis=[1])
   smask = tf.image.resize(tf.transpose(mask, [0, 2, 3, 1]), [32, 32])
-  loss_feat = tf.reduce_sum(tf.square(x_feat - x_rec_feat) * smask) / tf.reduce_sum(smask)
+  feat_diff = tf.reduce_mean(tf.square(x_feat - x_rec_feat), axis=[3])
+  loss_feat = tf.reduce_sum(feat_diff * smask) / tf.reduce_sum(smask)
   # loss_pix = tf.reduce_mean(tf.square(x - x_rec), axis=[1, 2, 3])
   loss_pix = tf.reduce_sum(tf.square(x - x_rec) * mask) \
     / tf.reduce_sum(mask)
@@ -220,7 +221,10 @@ def main():
     # Optimize latent codes.
     col_idx = 3
     for step in tqdm(range(1, args.num_iterations + 1), leave=False):
-      sess.run([train_op], {x: inputs, mask: masks})
+      lp, lf, _ = sess.run([loss_pix, loss_feat, train_op], {x: inputs, mask: masks})
+      #print(f"{step:05d}\t{lp:.3f}\t{lf:.3f}")
+      #fd, mask_img = sess.run([feat_diff, smask], {x: inputs, mask: masks})
+      #print(fd.shape, mask_img.shape, fd.min(), fd.max(), mask_img.min(), mask_img.max())
     
     outputs = sess.run([wp, x_rec])
     outputs[1] = adjust_pixel_range(outputs[1])
